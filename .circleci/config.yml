@@ -9,6 +9,7 @@ jobs:
     - checkout
     - run: go test -v ./...
     - run: go build ./...
+    - run: ls
     - persist_to_workspace:
         root: .
         path:
