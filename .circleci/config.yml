@@ -23,14 +23,14 @@ jobs:
     - setup_remote_docker
     - attach_workspace:
         at: .
-    - run: docker login -u $DOCKER_LOGIN -p $DOCKER_PASSWORD
+    - run: docker login -u $DOCKER_LOGIN -p $DOCKER_PASSWORD quay.io
     - run: docker build -t quay.io/simonpasquier/loadtest:latest .
     - run: docker push quay.io/simonpasquier/loadtest
 
 
 workflows:
   version: 2
-  prometheus:
+  main:
     jobs:
     - build:
         filters:
