@@ -28,8 +28,9 @@ import (
 )
 
 var (
-	help             bool
-	concurrent, rate int
+	help       bool
+	concurrent int
+	rate       float64
 )
 
 type uriSlice []string
@@ -47,7 +48,7 @@ var uris uriSlice
 
 func init() {
 	flag.BoolVar(&help, "help", false, "Help message")
-	flag.IntVar(&rate, "rate", 1, "Number of requests per second")
+	flag.Float64Var(&rate, "rate", 1.0, "Number of requests per second")
 	flag.IntVar(&concurrent, "concurrent", 1, "Maximum number of concurrent request per URI")
 	flag.Var(&uris, "uri", "URI to request (can be repeated)")
 }
@@ -57,14 +58,20 @@ func get(ctx context.Context, u string, ch chan struct{}) {
 		Transport: &http.Transport{
 			IdleConnTimeout: 1 * time.Minute,
 		},
-		Timeout: 30 * time.Second,
+		Timeout: 5 * time.Second,
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ch:
-			resp, err := client.Get(u)
+			req, err := http.NewRequest("GET", u, nil)
+			req = req.WithContext(ctx)
+			if err != nil {
+				log.Println(err)
+				break
+			}
+			resp, err := client.Do(req)
 			if err != nil {
 				log.Println(err)
 				break
@@ -104,7 +111,7 @@ func main() {
 		}
 
 		wg.Add(1)
-		interval := time.Second / time.Duration(rate)
+		interval := time.Duration(float64(time.Second) / rate)
 		go func() {
 			defer wg.Done()
 			for {
