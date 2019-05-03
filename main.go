@@ -17,21 +17,43 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mwitkow/go-conntrack"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+const reqTimeout = 5 * time.Second
 
 var (
 	help       bool
 	concurrent int
 	rate       float64
+	listen     string
+
+	duration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "loadtest_http_requests_duration_seconds",
+			Help: "Histogram of latencies for HTTP requests.",
+		},
+		[]string{"uri", "code"},
+	)
 )
+
+func init() {
+	prometheus.MustRegister(duration)
+}
 
 type uriSlice []string
 
@@ -51,14 +73,20 @@ func init() {
 	flag.Float64Var(&rate, "rate", 1.0, "Number of requests per second")
 	flag.IntVar(&concurrent, "concurrent", 1, "Maximum number of concurrent request per URI")
 	flag.Var(&uris, "uri", "URI to request (can be repeated)")
+	flag.StringVar(&listen, "listen", "", "Listen address")
 }
 
-func get(ctx context.Context, u string, ch chan struct{}) {
+func get(ctx context.Context, u string, ch chan struct{}, obs prometheus.ObserverVec) {
 	client := http.Client{
 		Transport: &http.Transport{
-			IdleConnTimeout: 1 * time.Minute,
+			IdleConnTimeout:     1 * time.Minute,
+			TLSHandshakeTimeout: reqTimeout,
+			DialContext: conntrack.NewDialContextFunc(
+				conntrack.DialWithTracing(),
+				conntrack.DialWithName(u),
+			),
 		},
-		Timeout: 5 * time.Second,
+		Timeout: reqTimeout,
 	}
 	for {
 		select {
@@ -71,14 +99,19 @@ func get(ctx context.Context, u string, ch chan struct{}) {
 				log.Println(err)
 				break
 			}
+			start := time.Now()
 			resp, err := client.Do(req)
 			if err != nil {
 				log.Println(err)
 				break
 			}
+			obs.WithLabelValues(strconv.Itoa(resp.StatusCode)).Observe(time.Since(start).Seconds())
 			if resp.StatusCode/100 == 5 {
 				log.Printf("%s: got %d status code", u, resp.StatusCode)
 			}
+			// Consume body to re-use the connection.
+			//nolint: errcheck
+			io.Copy(ioutil.Discard, resp.Body)
 			resp.Body.Close()
 		}
 	}
@@ -106,7 +139,7 @@ func main() {
 			wg.Add(1)
 			go func(uri string) {
 				defer wg.Done()
-				get(ctx, uri, ch)
+				get(ctx, uri, ch, duration.MustCurryWith(map[string]string{"uri": uri}))
 			}(uri)
 		}
 
@@ -130,6 +163,27 @@ func main() {
 						log.Printf("Channel full")
 					}
 				}
+			}
+		}()
+	}
+
+	if listen != "" {
+		wg.Add(1)
+		srv := &http.Server{Addr: listen}
+		go func() {
+			defer wg.Done()
+			errc := make(chan error)
+			go func() {
+				http.HandleFunc("/metrics", promhttp.Handler().ServeHTTP)
+				log.Println("Listening on", listen)
+				errc <- srv.ListenAndServe()
+
+			}()
+			select {
+			case <-ctx.Done():
+				srv.Close()
+			case err := <-errc:
+				log.Println("Error when starting server:", err)
 			}
 		}()
 	}
