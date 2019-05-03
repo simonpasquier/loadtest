@@ -37,6 +37,7 @@ workflows:
           tags:
             only: /.*/
     - push_image:
+        context: Quay
         requires:
         - build
         filters:
